@@ -98,6 +98,49 @@
   /* ── GPU section ── */
   #gpu-section { display: none; }
 
+  /* ── Container table ── */
+  .section-title {
+    font-size: 13px; font-weight: 600; color: var(--text);
+    margin: 28px 0 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-title .ctr-count {
+    font-size: 11px; font-weight: 500; color: var(--muted);
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1px 8px;
+  }
+  .table-wrap {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    padding: 10px 14px; text-align: left;
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--muted);
+    background: var(--surface2); border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { color: var(--text); }
+  thead th.sort-asc::after  { content: ' ↑'; color: var(--blue); }
+  thead th.sort-desc::after { content: ' ↓'; color: var(--blue); }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody td { padding: 9px 14px; vertical-align: middle; white-space: nowrap; }
+  .status-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; text-transform: capitalize;
+  }
+  .status-running { background: #1a3a1a; color: var(--green); }
+  .status-exited  { background: #3a1a1a; color: var(--red); }
+  .status-paused  { background: #3a3a1a; color: var(--yellow); }
+  .status-other   { background: var(--surface2); color: var(--muted); }
+  .mini-bar-wrap { display: flex; align-items: center; gap: 8px; min-width: 100px; }
+  .mini-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .mini-bar-fill { height: 100%; border-radius: 2px; background: var(--blue); transition: width .5s; }
+  .no-containers { padding: 32px; text-align: center; color: var(--muted); font-size: 13px; }
+
   /* ── Scrollbar ── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
@@ -229,6 +272,33 @@
     </div>
 
   </div><!-- /charts -->
+
+  <!-- ── Container table ── -->
+  <div class="section-title">
+    Docker Containers
+    <span class="ctr-count" id="ctr-count">0 running</span>
+  </div>
+  <div class="table-wrap">
+    <table id="ctr-table">
+      <thead>
+        <tr>
+          <th data-col="name">Container</th>
+          <th data-col="image">Image</th>
+          <th data-col="status">Status</th>
+          <th data-col="cpu_pct">CPU %</th>
+          <th data-col="mem_pct">Memory</th>
+          <th data-col="net_rx">Net RX</th>
+          <th data-col="net_tx">Net TX</th>
+          <th data-col="blk_r">Disk Read</th>
+          <th data-col="blk_w">Disk Write</th>
+        </tr>
+      </thead>
+      <tbody id="ctr-tbody">
+        <tr><td colspan="9" class="no-containers">Waiting for container data…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
 </main>
 
 <script>
@@ -399,6 +469,11 @@ async function loadHistory() {
 
     document.getElementById('hostname').textContent = data.hostname || '—';
 
+    if (data.containers) {
+      window._lastContainers = data.containers;
+      renderContainerTable(data.containers);
+    }
+
     if (data.gpu_available && data.gpu_names.length && !gpuInitialised) {
       initGpuCharts(data.gpu_names);
       gpuInitialised = true;
@@ -489,6 +564,11 @@ function connectWS() {
 
     updateCards(d);
 
+    if (d.containers) {
+      window._lastContainers = d.containers;
+      renderContainerTable(d.containers);
+    }
+
     const t = d.timestamp;
     push(chartCpu,     t, d.cpu);
     push(chartMem,     t, d.memory.percent);
@@ -508,6 +588,73 @@ function connectWS() {
 
   ws.onerror = () => ws.close();
 }
+
+// ── Container table ──────────────────────────────────────────────────────────
+
+let _sortCol = 'name', _sortAsc = true;
+
+function statusBadge(s) {
+  const cls = s === 'running' ? 'status-running'
+            : s === 'exited'  ? 'status-exited'
+            : s === 'paused'  ? 'status-paused' : 'status-other';
+  return `<span class="status-badge ${cls}">${s}</span>`;
+}
+
+function miniBar(pct, color = 'var(--blue)') {
+  return `<div class="mini-bar-wrap">
+    <div class="mini-bar"><div class="mini-bar-fill" style="width:${Math.min(pct,100).toFixed(1)}%;background:${color}"></div></div>
+    <span>${pct.toFixed(1)}%</span>
+  </div>`;
+}
+
+function renderContainerTable(containers) {
+  const tbody = document.getElementById('ctr-tbody');
+  const count = document.getElementById('ctr-count');
+
+  const running = containers.filter(c => c.status === 'running');
+  count.textContent = running.length + ' running' + (containers.length > running.length
+    ? ` / ${containers.length} total` : '');
+
+  if (!containers.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-containers">No containers found</td></tr>';
+    return;
+  }
+
+  // Sort
+  const sorted = [...containers].sort((a, b) => {
+    let av = a[_sortCol], bv = b[_sortCol];
+    if (typeof av === 'string') av = av.toLowerCase(), bv = bv.toLowerCase();
+    return _sortAsc ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+  });
+
+  tbody.innerHTML = sorted.map(c => `
+    <tr>
+      <td><strong>${c.name}</strong><br><span style="color:var(--muted);font-size:11px">${c.id}</span></td>
+      <td style="color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis">${c.image}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td>${miniBar(c.cpu_pct, 'var(--green)')}</td>
+      <td>${miniBar(c.mem_pct, 'var(--blue)')}<span style="color:var(--muted);font-size:11px">${fmtBytesSize(c.mem_usage)} / ${fmtBytesSize(c.mem_limit)}</span></td>
+      <td style="color:var(--purple)">${fmtBytes(c.net_rx)}</td>
+      <td style="color:var(--orange)">${fmtBytes(c.net_tx)}</td>
+      <td style="color:var(--cyan)">${fmtBytes(c.blk_r)}</td>
+      <td style="color:var(--yellow)">${fmtBytes(c.blk_w)}</td>
+    </tr>`).join('');
+}
+
+// Sortable column headers
+document.querySelectorAll('#ctr-table thead th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (_sortCol === col) _sortAsc = !_sortAsc;
+    else { _sortCol = col; _sortAsc = true; }
+    document.querySelectorAll('#ctr-table thead th').forEach(h => {
+      h.classList.remove('sort-asc', 'sort-desc');
+    });
+    th.classList.add(_sortAsc ? 'sort-asc' : 'sort-desc');
+    // Re-render with last known data
+    if (window._lastContainers) renderContainerTable(window._lastContainers);
+  });
+});
 
 // ── Clock ─────────────────────────────────────────────────────────────────────
 

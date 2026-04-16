@@ -4,8 +4,10 @@ import os
 import socket
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import docker
 import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -61,6 +63,111 @@ _prev_time = time.monotonic()
 
 # Active WebSocket connections
 clients: set[WebSocket] = set()
+
+# ---------------------------------------------------------------------------
+# Docker container stats
+# ---------------------------------------------------------------------------
+_docker_client = None
+_prev_ctr_counters: dict = {}   # container_id -> {net_rx, net_tx, blk_r, blk_w, ts}
+_latest_containers: list[dict] = []
+_container_executor = ThreadPoolExecutor(max_workers=20)
+
+
+def _get_docker_client():
+    global _docker_client
+    if _docker_client is None:
+        _docker_client = docker.DockerClient(base_url="unix:///var/run/docker.sock")
+    return _docker_client
+
+
+def _fetch_container_stats(c) -> dict | None:
+    """Fetch stats for a single container (runs in a thread)."""
+    try:
+        s = c.stats(stream=False)
+
+        # CPU %
+        cpu_delta = (s["cpu_stats"]["cpu_usage"]["total_usage"]
+                     - s["precpu_stats"]["cpu_usage"]["total_usage"])
+        sys_delta  = (s["cpu_stats"].get("system_cpu_usage", 0)
+                     - s["precpu_stats"].get("system_cpu_usage", 0))
+        num_cpus   = s["cpu_stats"].get("online_cpus") or len(
+                         s["cpu_stats"]["cpu_usage"].get("percpu_usage", [1]))
+        cpu_pct = (cpu_delta / sys_delta * num_cpus * 100.0) if sys_delta > 0 else 0.0
+
+        # Memory
+        mem_stats  = s.get("memory_stats", {})
+        # Exclude page cache so the number matches `docker stats`
+        cache      = (mem_stats.get("stats") or {}).get("inactive_file", 0)
+        mem_usage  = max(0, mem_stats.get("usage", 0) - cache)
+        mem_limit  = mem_stats.get("limit", 1) or 1
+        mem_pct    = mem_usage / mem_limit * 100
+
+        # Cumulative network counters
+        net_rx = net_tx = 0
+        for iface in (s.get("networks") or {}).values():
+            net_rx += iface.get("rx_bytes", 0)
+            net_tx += iface.get("tx_bytes", 0)
+
+        # Cumulative block I/O counters
+        blk_r = blk_w = 0
+        for entry in (s.get("blkio_stats", {}).get("io_service_bytes_recursive") or []):
+            op = entry.get("op", "").lower()
+            if op == "read":
+                blk_r += entry.get("value", 0)
+            elif op == "write":
+                blk_w += entry.get("value", 0)
+
+        # Rate calculation using previous sample
+        now  = time.monotonic()
+        prev = _prev_ctr_counters.get(c.id, {})
+        dt   = max(now - prev.get("ts", now - SAMPLE_INTERVAL), 0.001)
+        net_rx_rate = max(0.0, (net_rx - prev.get("net_rx", net_rx)) / dt)
+        net_tx_rate = max(0.0, (net_tx - prev.get("net_tx", net_tx)) / dt)
+        blk_r_rate  = max(0.0, (blk_r  - prev.get("blk_r",  blk_r))  / dt)
+        blk_w_rate  = max(0.0, (blk_w  - prev.get("blk_w",  blk_w))  / dt)
+        _prev_ctr_counters[c.id] = {"ts": now, "net_rx": net_rx, "net_tx": net_tx,
+                                     "blk_r": blk_r, "blk_w": blk_w}
+
+        tags  = c.image.tags
+        image = tags[0] if tags else (c.image.short_id or "")
+
+        return {
+            "id":        c.short_id,
+            "name":      c.name,
+            "image":     image,
+            "status":    c.status,
+            "cpu_pct":   round(cpu_pct, 1),
+            "mem_usage": mem_usage,
+            "mem_limit": mem_limit,
+            "mem_pct":   round(mem_pct, 1),
+            "net_rx":    round(net_rx_rate, 1),
+            "net_tx":    round(net_tx_rate, 1),
+            "blk_r":     round(blk_r_rate, 1),
+            "blk_w":     round(blk_w_rate, 1),
+        }
+    except Exception:
+        return None
+
+
+def _collect_containers_sync() -> list[dict]:
+    try:
+        containers = _get_docker_client().containers.list()
+        futures    = [_container_executor.submit(_fetch_container_stats, c) for c in containers]
+        results    = [f.result() for f in futures]
+        return sorted([r for r in results if r], key=lambda x: x["name"])
+    except Exception:
+        return []
+
+
+async def background_container_collector():
+    loop = asyncio.get_event_loop()
+    while True:
+        global _latest_containers
+        try:
+            _latest_containers = await loop.run_in_executor(None, _collect_containers_sync)
+        except Exception:
+            pass
+        await asyncio.sleep(SAMPLE_INTERVAL)
 
 # ---------------------------------------------------------------------------
 # Metric collection
@@ -150,6 +257,7 @@ def collect_metrics() -> dict:
         "disk_total": psutil.disk_usage(HOST_ROOT).total,
         "gpus":       gpus,
         "hostname":   HOSTNAME,
+        "containers": _latest_containers,
     }
 
 
@@ -185,6 +293,7 @@ async def startup():
     # Warm up cpu_percent so the first real reading isn't 0.0
     psutil.cpu_percent()
     asyncio.create_task(background_collector())
+    asyncio.create_task(background_container_collector())
 
 
 @app.get("/api/history")
@@ -201,6 +310,7 @@ async def get_history():
         "gpu_available": GPU_AVAILABLE,
         "gpu_names":    GPU_NAMES,
         "hostname":     HOSTNAME,
+        "containers":   _latest_containers,
     }
     if GPU_AVAILABLE:
         result["gpu_util"] = [list(q) for q in history["gpu_util"]]

@@ -12,6 +12,8 @@ services:
     volumes:
       # Mount host root read-only so disk-usage reports the physical filesystem
       - /:/rootfs:ro,bind
+      # Docker socket so we can read per-container stats
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
     environment:
       HOST_ROOT: /rootfs
