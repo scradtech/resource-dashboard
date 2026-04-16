@@ -1,0 +1,26 @@
+services:
+  dashboard:
+    build: .
+    container_name: resource-dashboard
+    restart: unless-stopped
+
+    # Share the host's PID and network namespace so psutil reads real host
+    # metrics (CPU, memory, network interfaces, disk counters).
+    pid: "host"
+    network_mode: "host"   # dashboard binds directly to port 8080 on the host
+
+    volumes:
+      # Mount host root read-only so disk-usage reports the physical filesystem
+      - /:/rootfs:ro,bind
+
+    environment:
+      HOST_ROOT: /rootfs
+
+    # ── NVIDIA GPU support ──────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

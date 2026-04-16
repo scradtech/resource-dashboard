@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Server Resource Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #1c2128;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --green:     #3fb950;
+    --blue:      #58a6ff;
+    --orange:    #f0883e;
+    --purple:    #bc8cff;
+    --red:       #f85149;
+    --cyan:      #39d3f2;
+    --yellow:    #e3b341;
+    --pink:      #f778ba;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+               font-size: 14px; line-height: 1.5; }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--surface);
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  header h1 span { color: var(--blue); }
+  .header-right { display: flex; align-items: center; gap: 20px; }
+  .badge { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+         box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+  #clock { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  /* ── Layout ── */
+  main { padding: 20px 24px; max-width: 1600px; margin: 0 auto; }
+
+  /* ── Stat Cards ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 14px; margin-bottom: 24px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--accent, var(--blue));
+  }
+  .card-label { color: var(--muted); font-size: 11px; text-transform: uppercase;
+                letter-spacing: .8px; margin-bottom: 8px; }
+  .card-value { font-size: 28px; font-weight: 700; color: var(--accent, var(--blue));
+                line-height: 1; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  .card-sub   { font-size: 12px; color: var(--muted); }
+
+  /* Progress bar inside card */
+  .card-bar { margin-top: 10px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .card-bar-fill { height: 100%; border-radius: 2px; background: var(--accent, var(--blue));
+                   transition: width .5s ease; }
+
+  /* ── Charts Grid ── */
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+  @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .chart-card.wide { grid-column: 1 / -1; }
+  .chart-header { display: flex; align-items: center; justify-content: space-between;
+                  margin-bottom: 14px; }
+  .chart-title  { font-size: 13px; font-weight: 600; color: var(--text); }
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; }
+  .legend-item  { display: flex; align-items: center; gap: 5px;
+                  font-size: 11px; color: var(--muted); }
+  .legend-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .chart-wrap   { position: relative; height: 180px; }
+
+  /* ── GPU section ── */
+  #gpu-section { display: none; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9881; Server Monitor &mdash; <span id="hostname">loading…</span></h1>
+  <div class="header-right">
+    <div class="badge"><div class="dot"></div><span id="conn-status">connecting…</span></div>
+    <div id="clock">--:--:--</div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Stat Cards ── -->
+  <div class="cards">
+    <div class="card" style="--accent:var(--green)">
+      <div class="card-label">CPU Usage</div>
+      <div class="card-value" id="s-cpu">--</div>
+      <div class="card-sub"   id="s-cpu-sub">-- cores</div>
+      <div class="card-bar"><div class="card-bar-fill" id="s-cpu-bar" style="width:0%"></div></div>
+    </div>
+    <div class="card" style="--accent:var(--blue)">
+      <div class="card-label">Memory</div>
+      <div class="card-value" id="s-mem">--</div>
+      <div class="card-sub"   id="s-mem-sub">-- / --</div>
+      <div class="card-bar"><div class="card-bar-fill" id="s-mem-bar" style="width:0%"></div></div>
+    </div>
+    <div class="card" style="--accent:var(--orange)">
+      <div class="card-label">Network TX</div>
+      <div class="card-value" id="s-tx">--</div>
+      <div class="card-sub"   id="s-rx">RX: --</div>
+    </div>
+    <div class="card" style="--accent:var(--purple)">
+      <div class="card-label">Disk I/O Read</div>
+      <div class="card-value" id="s-dr">--</div>
+      <div class="card-sub"   id="s-dw">Write: --</div>
+    </div>
+    <div class="card" style="--accent:var(--pink)">
+      <div class="card-label">Storage Used</div>
+      <div class="card-value" id="s-du">--</div>
+      <div class="card-sub"   id="s-du-sub">-- used</div>
+      <div class="card-bar"><div class="card-bar-fill" id="s-du-bar" style="width:0%"></div></div>
+    </div>
+    <!-- GPU cards injected dynamically -->
+    <div id="gpu-cards"></div>
+  </div>
+
+  <!-- ── Charts ── -->
+  <div class="charts">
+
+    <!-- CPU -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">CPU Utilisation</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>CPU %</div>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-cpu"></canvas></div>
+    </div>
+
+    <!-- Memory -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Memory Utilisation</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>RAM %</div>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-mem"></canvas></div>
+    </div>
+
+    <!-- Network -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Network I/O</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>TX</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div>RX</div>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-net"></canvas></div>
+    </div>
+
+    <!-- Disk I/O -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Disk I/O</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--cyan)"></div>Read</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Write</div>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-disk"></canvas></div>
+    </div>
+
+    <!-- Storage usage (line over time) -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Storage Usage</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--pink)"></div>Used %</div>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-storage"></canvas></div>
+    </div>
+
+    <!-- GPU (hidden until confirmed available) -->
+    <div id="gpu-section" class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">GPU Utilisation</span>
+        <div class="chart-legend" id="gpu-legend"></div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-gpu"></canvas></div>
+    </div>
+
+    <!-- GPU Memory -->
+    <div id="gpu-mem-section" class="chart-card" style="display:none">
+      <div class="chart-header">
+        <span class="chart-title">GPU Memory</span>
+        <div class="chart-legend" id="gpu-mem-legend"></div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-gpu-mem"></canvas></div>
+    </div>
+
+  </div><!-- /charts -->
+</main>
+
+<script>
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function fmtBytes(b) {
+  if (b === null || b === undefined || isNaN(b)) return '0 B/s';
+  const abs = Math.abs(b);
+  if (abs < 1024)       return b.toFixed(0) + ' B/s';
+  if (abs < 1048576)    return (b/1024).toFixed(1) + ' KB/s';
+  if (abs < 1073741824) return (b/1048576).toFixed(1) + ' MB/s';
+  return (b/1073741824).toFixed(2) + ' GB/s';
+}
+
+function fmtBytesSize(b) {
+  if (b < 1024)         return b.toFixed(0) + ' B';
+  if (b < 1048576)      return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824)   return (b/1048576).toFixed(1) + ' MB';
+  if (b < 1099511627776)return (b/1073741824).toFixed(1) + ' GB';
+  return (b/1099511627776).toFixed(2) + ' TB';
+}
+
+function fmtPct(v) { return (v ?? 0).toFixed(1) + '%'; }
+
+// ── Chart factory ─────────────────────────────────────────────────────────────
+
+const CHART_DEFAULTS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      borderWidth: 1,
+      titleColor: '#8b949e',
+      bodyColor: '#e6edf3',
+      padding: 10,
+    }
+  },
+  scales: {
+    x: {
+      type: 'time',
+      time: { unit: 'minute', displayFormats: { minute: 'HH:mm', second: 'HH:mm:ss' } },
+      grid:  { color: '#21262d' },
+      ticks: { color: '#8b949e', maxTicksLimit: 6, maxRotation: 0 },
+    },
+    y: {
+      grid:  { color: '#21262d' },
+      ticks: { color: '#8b949e', maxTicksLimit: 5 },
+      beginAtZero: true,
+    }
+  }
+};
+
+function pctScaleOptions() {
+  return { ...CHART_DEFAULTS,
+    scales: { ...CHART_DEFAULTS.scales,
+      y: { ...CHART_DEFAULTS.scales.y, min: 0, max: 100,
+           ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => v + '%' } }
+    }
+  };
+}
+
+function bytesScaleOptions() {
+  return { ...CHART_DEFAULTS,
+    scales: { ...CHART_DEFAULTS.scales,
+      y: { ...CHART_DEFAULTS.scales.y,
+           ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => fmtBytes(v) } }
+    }
+  };
+}
+
+function makeDataset(color, label, fill = true) {
+  return {
+    label,
+    data: [],
+    borderColor: color,
+    backgroundColor: fill ? color + '22' : 'transparent',
+    borderWidth: 1.5,
+    pointRadius: 0,
+    tension: 0.35,
+    fill: fill,
+  };
+}
+
+function mkChart(id, options, ...datasets) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, { type: 'line', data: { datasets }, options });
+}
+
+function push(chart, ts, ...values) {
+  const t = new Date(ts);
+  chart.data.datasets.forEach((ds, i) => {
+    ds.data.push({ x: t, y: values[i] ?? 0 });
+    if (ds.data.length > 1800) ds.data.shift();
+  });
+  chart.update('none');
+}
+
+// ── Create charts ─────────────────────────────────────────────────────────────
+
+const chartCpu     = mkChart('chart-cpu',     pctScaleOptions(),
+  makeDataset('var(--green)',  'CPU %'));
+
+const chartMem     = mkChart('chart-mem',     pctScaleOptions(),
+  makeDataset('var(--blue)',   'RAM %'));
+
+const chartNet     = mkChart('chart-net',     bytesScaleOptions(),
+  makeDataset('var(--orange)', 'TX', false),
+  makeDataset('var(--purple)', 'RX', false));
+
+const chartDisk    = mkChart('chart-disk',    bytesScaleOptions(),
+  makeDataset('var(--cyan)',   'Read', false),
+  makeDataset('var(--yellow)', 'Write', false));
+
+const chartStorage = mkChart('chart-storage', pctScaleOptions(),
+  makeDataset('var(--pink)',   'Used %'));
+
+let chartGpu    = null;
+let chartGpuMem = null;
+
+// GPU charts are built after first data arrives and GPU count is known
+function initGpuCharts(gpuNames) {
+  const GPU_COLORS = ['var(--cyan)', 'var(--orange)', 'var(--green)', 'var(--yellow)'];
+  const MEM_COLORS = ['var(--purple)', 'var(--red)', 'var(--blue)', 'var(--pink)'];
+
+  const gpuDatasets    = gpuNames.map((n, i) => makeDataset(GPU_COLORS[i % GPU_COLORS.length], n, false));
+  const gpuMemDatasets = gpuNames.map((n, i) => makeDataset(MEM_COLORS[i % MEM_COLORS.length], n + ' Mem', false));
+
+  chartGpu    = mkChart('chart-gpu',     pctScaleOptions(), ...gpuDatasets);
+  chartGpuMem = mkChart('chart-gpu-mem', pctScaleOptions(), ...gpuMemDatasets);
+
+  // Legends
+  gpuNames.forEach((n, i) => {
+    document.getElementById('gpu-legend').insertAdjacentHTML('beforeend',
+      `<div class="legend-item"><div class="legend-dot" style="background:${GPU_COLORS[i % GPU_COLORS.length]}"></div>${n}</div>`);
+    document.getElementById('gpu-mem-legend').insertAdjacentHTML('beforeend',
+      `<div class="legend-item"><div class="legend-dot" style="background:${MEM_COLORS[i % MEM_COLORS.length]}"></div>${n}</div>`);
+  });
+
+  // GPU stat cards
+  const container = document.getElementById('gpu-cards');
+  gpuNames.forEach((n, i) => {
+    container.insertAdjacentHTML('beforeend', `
+      <div class="card" style="--accent:var(--cyan)">
+        <div class="card-label">GPU ${i} &mdash; ${n.replace(/NVIDIA /i,'')}</div>
+        <div class="card-value" id="s-gpu-${i}">--</div>
+        <div class="card-sub"   id="s-gpu-mem-${i}">Mem: -- &bull; -- &deg;C</div>
+        <div class="card-bar"><div class="card-bar-fill" id="s-gpu-bar-${i}" style="width:0%"></div></div>
+      </div>`);
+  });
+
+  document.getElementById('gpu-section').style.display     = '';
+  document.getElementById('gpu-mem-section').style.display = '';
+}
+
+// ── Seed charts with history ──────────────────────────────────────────────────
+
+let gpuInitialised = false;
+
+async function loadHistory() {
+  try {
+    const res  = await fetch('/api/history');
+    const data = await res.json();
+
+    document.getElementById('hostname').textContent = data.hostname || '—';
+
+    if (data.gpu_available && data.gpu_names.length && !gpuInitialised) {
+      initGpuCharts(data.gpu_names);
+      gpuInitialised = true;
+    }
+
+    const ts = data.timestamps;
+    ts.forEach((t, i) => {
+      push(chartCpu,     t, data.cpu[i]);
+      push(chartMem,     t, data.memory[i]);
+      push(chartNet,     t, data.net_sent[i], data.net_recv[i]);
+      push(chartDisk,    t, data.disk_read[i], data.disk_write[i]);
+      push(chartStorage, t, data.disk_usage[i]);
+      if (gpuInitialised && data.gpu_util) {
+        const gpuVals    = data.gpu_util.map(q => q[i]);
+        const gpuMemVals = data.gpu_mem.map(q => q[i]);
+        push(chartGpu,    t, ...gpuVals);
+        push(chartGpuMem, t, ...gpuMemVals);
+      }
+    });
+  } catch(e) {
+    console.warn('History fetch failed', e);
+  }
+}
+
+// ── Update stat cards ─────────────────────────────────────────────────────────
+
+function updateCards(d) {
+  document.getElementById('hostname').textContent = d.hostname || '—';
+
+  // CPU
+  document.getElementById('s-cpu').textContent     = fmtPct(d.cpu);
+  document.getElementById('s-cpu-sub').textContent = (d.cpu_cores || '?') + ' cores';
+  document.getElementById('s-cpu-bar').style.width = d.cpu + '%';
+
+  // Memory
+  const mp = d.memory;
+  document.getElementById('s-mem').textContent     = fmtPct(mp.percent);
+  document.getElementById('s-mem-sub').textContent = fmtBytesSize(mp.used) + ' / ' + fmtBytesSize(mp.total);
+  document.getElementById('s-mem-bar').style.width = mp.percent + '%';
+
+  // Network
+  document.getElementById('s-tx').textContent = fmtBytes(d.net_sent);
+  document.getElementById('s-rx').textContent = 'RX: ' + fmtBytes(d.net_recv);
+
+  // Disk I/O
+  document.getElementById('s-dr').textContent = fmtBytes(d.disk_read);
+  document.getElementById('s-dw').textContent = 'Write: ' + fmtBytes(d.disk_write);
+
+  // Storage
+  document.getElementById('s-du').textContent     = fmtPct(d.disk_usage);
+  document.getElementById('s-du-sub').textContent = fmtBytesSize(d.disk_total || 0) + ' total';
+  document.getElementById('s-du-bar').style.width = d.disk_usage + '%';
+
+  // GPU
+  if (d.gpus && d.gpus.length) {
+    d.gpus.forEach((g, i) => {
+      const el = document.getElementById('s-gpu-' + i);
+      if (el) {
+        el.textContent = fmtPct(g.util);
+        document.getElementById('s-gpu-mem-' + i).textContent =
+          'Mem: ' + fmtPct(g.mem_pct) + ' \u2022 ' + g.temp + '\u00b0C';
+        document.getElementById('s-gpu-bar-' + i).style.width = g.util + '%';
+      }
+    });
+  }
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws    = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    document.getElementById('conn-status').textContent = 'live';
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type !== 'metrics') return;
+    const d = msg.data;
+
+    // Init GPU charts on first live message if not already done
+    if (d.gpus && d.gpus.length && !gpuInitialised) {
+      initGpuCharts(d.gpus.map(g => g.name));
+      gpuInitialised = true;
+    }
+
+    updateCards(d);
+
+    const t = d.timestamp;
+    push(chartCpu,     t, d.cpu);
+    push(chartMem,     t, d.memory.percent);
+    push(chartNet,     t, d.net_sent, d.net_recv);
+    push(chartDisk,    t, d.disk_read, d.disk_write);
+    push(chartStorage, t, d.disk_usage);
+    if (gpuInitialised && d.gpus.length) {
+      push(chartGpu,    t, ...d.gpus.map(g => g.util));
+      push(chartGpuMem, t, ...d.gpus.map(g => g.mem_pct));
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('conn-status').textContent = 'reconnecting…';
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+
+function tick() {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB', { hour12: false });
+}
+setInterval(tick, 1000);
+tick();
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+
+loadHistory().then(connectWS);
+</script>
+</body>
+</html>
